@@ -49,9 +49,15 @@ local Camera = workspace.CurrentCamera
 -- It only handles actual Roblox error/disconnect prompts.
 -- ====================================================================
 
+local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
+local CoreGui = game:GetService("CoreGui")
+
 local rejoinInProgress = false
+local teleportAttempted = false
 
 local function initiateRejoinSequence()
+    -- Prevent multiple ErrorPrompt/ErrorMessageChanged events
     if rejoinInProgress then
         return
     end
@@ -59,42 +65,111 @@ local function initiateRejoinSequence()
     rejoinInProgress = true
 
     task.spawn(function()
-        task.wait(1)
+        -- Give Roblox time to finish displaying the kick/error screen
+        task.wait(2)
 
-        while true do
-            local success = pcall(function()
+        -- Only make ONE teleport request at a time
+        if teleportAttempted then
+            return
+        end
+
+        teleportAttempted = true
+
+        local success, err = pcall(function()
+            TeleportService:Teleport(game.PlaceId, LocalPlayer)
+        end)
+
+        if not success then
+            -- Teleport request itself failed.
+            -- Retry only a limited number of times instead of
+            -- running an infinite loop.
+            teleportAttempted = false
+
+            task.wait(5)
+
+            if not rejoinInProgress then
+                return
+            end
+
+            local retrySuccess = pcall(function()
                 TeleportService:Teleport(game.PlaceId, LocalPlayer)
             end)
 
-            if success then
-                task.wait(10)
-            else
-                task.wait(5)
+            if not retrySuccess then
+                -- Stop completely instead of freezing the client
+                rejoinInProgress = false
+                teleportAttempted = false
             end
         end
     end)
 end
 
-GuiService.ErrorMessageChanged:Connect(function()
-    initiateRejoinSequence()
+
+-- Roblox reports that teleport initialization failed.
+-- This is safer than assuming pcall(success) means the teleport worked.
+pcall(function()
+    TeleportService.TeleportInitFailed:Connect(function()
+        if rejoinInProgress then
+            task.spawn(function()
+                task.wait(5)
+
+                rejoinInProgress = false
+                teleportAttempted = false
+
+                initiateRejoinSequence()
+            end)
+        end
+    end)
 end)
 
+
+-- Roblox error message detection
+pcall(function()
+    GuiService.ErrorMessageChanged:Connect(function()
+        initiateRejoinSequence()
+    end)
+end)
+
+
+-- Detect Roblox's ErrorPrompt
 task.spawn(function()
-    local robloxPromptGui = game:GetService("CoreGui"):WaitForChild("RobloxPromptGui", 15)
-    local promptOverlay = robloxPromptGui and robloxPromptGui:WaitForChild("promptOverlay", 10)
+    local robloxPromptGui
 
-    if promptOverlay then
+    local success = pcall(function()
+        robloxPromptGui = CoreGui:WaitForChild("RobloxPromptGui", 15)
+    end)
 
+    if not success or not robloxPromptGui then
+        return
+    end
+
+    local promptOverlay
+
+    success = pcall(function()
+        promptOverlay = robloxPromptGui:WaitForChild("promptOverlay", 10)
+    end)
+
+    if not success or not promptOverlay then
+        return
+    end
+
+
+    -- ErrorPrompt already exists
+    pcall(function()
         if promptOverlay:FindFirstChild("ErrorPrompt") then
             initiateRejoinSequence()
         end
+    end)
 
+
+    -- Detect a newly-created ErrorPrompt
+    pcall(function()
         promptOverlay.ChildAdded:Connect(function(child)
-            if child.Name == "ErrorPrompt" then
+            if child and child.Name == "ErrorPrompt" then
                 initiateRejoinSequence()
             end
         end)
-    end
+    end)
 end)
 
 -- ====================================================================
