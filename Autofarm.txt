@@ -1,0 +1,2066 @@
+local HttpService = game:GetService("HttpService")
+local TeleportService = game:GetService("TeleportService")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local GuiService = game:GetService("GuiService")
+
+local LocalPlayer = Players.LocalPlayer or Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+local Camera = workspace.CurrentCamera
+
+-- ====================================================================
+-- DISCONNECT / ERROR RECOVERY
+-- NOTE:
+-- This is NOT used when there are no ATMs/CA$HIERS.
+-- It only handles actual Roblox error/disconnect prompts.
+-- ====================================================================
+
+local rejoinInProgress = false
+
+local function initiateRejoinSequence()
+    if rejoinInProgress then
+        return
+    end
+
+    rejoinInProgress = true
+
+    task.spawn(function()
+        task.wait(1)
+
+        while true do
+            local success = pcall(function()
+                TeleportService:Teleport(game.PlaceId, LocalPlayer)
+            end)
+
+            if success then
+                task.wait(10)
+            else
+                task.wait(5)
+            end
+        end
+    end)
+end
+
+GuiService.ErrorMessageChanged:Connect(function()
+    initiateRejoinSequence()
+end)
+
+task.spawn(function()
+    local robloxPromptGui = game:GetService("CoreGui"):WaitForChild("RobloxPromptGui", 15)
+    local promptOverlay = robloxPromptGui and robloxPromptGui:WaitForChild("promptOverlay", 10)
+
+    if promptOverlay then
+
+        if promptOverlay:FindFirstChild("ErrorPrompt") then
+            initiateRejoinSequence()
+        end
+
+        promptOverlay.ChildAdded:Connect(function(child)
+            if child.Name == "ErrorPrompt" then
+                initiateRejoinSequence()
+            end
+        end)
+    end
+end)
+
+-- ====================================================================
+-- GAME LOADING
+-- ====================================================================
+
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+
+local fullyLoadedChar = Character:WaitForChild("FULLY_LOADED_CHAR", 30)
+
+if not fullyLoadedChar then
+    warn("Script timed out waiting for FULLY_LOADED_CHAR.")
+    return
+end
+
+print("Character is fully loaded!")
+
+-- ====================================================================
+-- CONFIG / GLOBALS
+-- ====================================================================
+
+local PICKUP_DELAY = 0.2
+
+local _fireclickdetector =
+    fireclickdetector
+    or (syn and syn.fire_click_detector)
+
+local pickedUpCash = {}
+local isCuffed = false
+local CurrentState = "Initializing System..."
+
+getgenv().wait2 = 0.12
+getgenv().selectedCashier = nil
+getgenv().noclipCashier = false
+getgenv().isProcessingCash = false
+getgenv().isLooting = false
+getgenv().CASH_AURA_RANGE = 10
+getgenv().ammoBoughtCount = 0
+
+-- ====================================================================
+-- NO-ATM WAIT CONFIG
+-- ====================================================================
+
+local NO_ATM_SCAN_DELAY = 2
+local HIGH_WAIT_HEIGHT_OFFSET = 4
+local HIGH_WAIT_SEARCH_LIMIT = 5000
+
+local isWaitingForATM = false
+local waitingPosition = nil
+
+-- ====================================================================
+-- WHITE SCREEN
+-- ====================================================================
+
+if getgenv().Whitescreen then
+    task.spawn(function()
+
+        local coreGui = game:GetService("CoreGui")
+
+        if coreGui:FindFirstChild("SkidoGPU_Saver") then
+            coreGui.SkidoGPU_Saver:Destroy()
+        end
+
+        local gpuSaver = Instance.new("ScreenGui")
+        gpuSaver.Name = "SkidoGPU_Saver"
+        gpuSaver.DisplayOrder = -1000
+        gpuSaver.Parent = coreGui
+
+        local whiteFrame = Instance.new("Frame")
+        whiteFrame.Size = UDim2.new(1, 0, 1, 0)
+        whiteFrame.BackgroundColor3 = Color3.fromRGB(245, 245, 245)
+        whiteFrame.BorderSizePixel = 0
+        whiteFrame.Parent = gpuSaver
+
+    end)
+end
+
+-- ====================================================================
+-- UI
+-- ====================================================================
+
+local UI = {}
+
+local function CreateUI()
+
+    local coreGui = game:GetService("CoreGui")
+
+    if coreGui:FindFirstChild("SkidoDashboard") then
+        coreGui.SkidoDashboard:Destroy()
+    end
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "SkidoDashboard"
+    sg.ResetOnSpawn = false
+    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    sg.Parent = coreGui
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 240, 0, 280)
+    mainFrame.Position = UDim2.new(0, 30, 0.5, -140)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(15, 16, 22)
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Parent = sg
+
+    local mainCorner = Instance.new("UICorner")
+    mainCorner.CornerRadius = UDim.new(0, 12)
+    mainCorner.Parent = mainFrame
+
+    local mainStroke = Instance.new("UIStroke")
+    mainStroke.Color = Color3.fromRGB(0, 230, 115)
+    mainStroke.Thickness = 1.5
+    mainStroke.Transparency = 0.2
+    mainStroke.Parent = mainFrame
+
+    local glowLine = Instance.new("Frame")
+    glowLine.Size = UDim2.new(1, 0, 0, 3)
+    glowLine.BackgroundColor3 = Color3.fromRGB(0, 230, 115)
+    glowLine.BorderSizePixel = 0
+    glowLine.Parent = mainFrame
+
+    Instance.new("UICorner", glowLine).CornerRadius = UDim.new(0, 12)
+
+    local avatarFrame = Instance.new("ImageLabel")
+    avatarFrame.Name = "Avatar"
+    avatarFrame.Size = UDim2.new(0, 64, 0, 64)
+    avatarFrame.Position = UDim2.new(0.5, -32, 0, 25)
+    avatarFrame.BackgroundColor3 = Color3.fromRGB(22, 24, 33)
+    avatarFrame.BorderSizePixel = 0
+    avatarFrame.Image =
+        "rbxthumb://type=AvatarHeadShot&id="
+        .. LocalPlayer.UserId
+        .. "&w=150&h=150"
+    avatarFrame.Parent = mainFrame
+
+    local avatarCorner = Instance.new("UICorner")
+    avatarCorner.CornerRadius = UDim.new(1, 0)
+    avatarCorner.Parent = avatarFrame
+
+    local avatarStroke = Instance.new("UIStroke")
+    avatarStroke.Color = Color3.fromRGB(35, 38, 50)
+    avatarStroke.Thickness = 2
+    avatarStroke.Parent = avatarFrame
+
+    local titleText = Instance.new("TextLabel")
+    titleText.Size = UDim2.new(1, 0, 0, 20)
+    titleText.Position = UDim2.new(0, 0, 0, 95)
+    titleText.BackgroundTransparency = 1
+    titleText.Text = "SKIDO AUTOFARM V2"
+    titleText.Font = Enum.Font.GothamBold
+    titleText.TextColor3 = Color3.fromRGB(255, 255, 255)
+    titleText.TextSize = 13
+    titleText.Parent = mainFrame
+
+    local statusCard = Instance.new("Frame")
+    statusCard.Size = UDim2.new(0, 210, 0, 45)
+    statusCard.Position = UDim2.new(0, 15, 0, 130)
+    statusCard.BackgroundColor3 = Color3.fromRGB(22, 24, 33)
+    statusCard.BorderSizePixel = 0
+    statusCard.Parent = mainFrame
+
+    Instance.new("UICorner", statusCard).CornerRadius = UDim.new(0, 6)
+
+    local statusHeader = Instance.new("TextLabel")
+    statusHeader.Size = UDim2.new(1, 0, 0, 18)
+    statusHeader.Position = UDim2.new(0, 10, 0, 4)
+    statusHeader.BackgroundTransparency = 1
+    statusHeader.TextXAlignment = Enum.TextXAlignment.Left
+    statusHeader.Text = "CURRENT STATE"
+    statusHeader.Font = Enum.Font.GothamBold
+    statusHeader.TextColor3 = Color3.fromRGB(120, 125, 145)
+    statusHeader.TextSize = 9
+    statusHeader.Parent = statusCard
+
+    local statusVal = Instance.new("TextLabel")
+    statusVal.Size = UDim2.new(1, -20, 0, 18)
+    statusVal.Position = UDim2.new(0, 10, 0, 20)
+    statusVal.BackgroundTransparency = 1
+    statusVal.TextXAlignment = Enum.TextXAlignment.Left
+    statusVal.Text = "Starting up..."
+    statusVal.Font = Enum.Font.GothamMedium
+    statusVal.TextColor3 = Color3.fromRGB(0, 230, 115)
+    statusVal.TextSize = 12
+    statusVal.Parent = statusCard
+
+    local cashCard = Instance.new("Frame")
+    cashCard.Size = UDim2.new(0, 210, 0, 45)
+    cashCard.Position = UDim2.new(0, 15, 0, 185)
+    cashCard.BackgroundColor3 = Color3.fromRGB(22, 24, 33)
+    cashCard.BorderSizePixel = 0
+    cashCard.Parent = mainFrame
+
+    Instance.new("UICorner", cashCard).CornerRadius = UDim.new(0, 6)
+
+    local cashHeader = Instance.new("TextLabel")
+    cashHeader.Size = UDim2.new(1, 0, 0, 18)
+    cashHeader.Position = UDim2.new(0, 10, 0, 4)
+    cashHeader.BackgroundTransparency = 1
+    cashHeader.TextXAlignment = Enum.TextXAlignment.Left
+    cashHeader.Text = "ESTIMATED PROFIT RATE"
+    cashHeader.Font = Enum.Font.GothamBold
+    cashHeader.TextColor3 = Color3.fromRGB(120, 125, 145)
+    cashHeader.TextSize = 9
+    cashHeader.Parent = cashCard
+
+    local cashVal = Instance.new("TextLabel")
+    cashVal.Size = UDim2.new(1, -20, 0, 18)
+    cashVal.Position = UDim2.new(0, 10, 0, 20)
+    cashVal.BackgroundTransparency = 1
+    cashVal.TextXAlignment = Enum.TextXAlignment.Left
+    cashVal.Text = "$0 / hr"
+    cashVal.Font = Enum.Font.GothamBold
+    cashVal.TextColor3 = Color3.fromRGB(255, 215, 0)
+    cashVal.TextSize = 14
+    cashVal.Parent = cashCard
+
+    local footerText = Instance.new("TextLabel")
+    footerText.Size = UDim2.new(1, 0, 0, 20)
+    footerText.Position = UDim2.new(0, 0, 1, -25)
+    footerText.BackgroundTransparency = 1
+    footerText.Text = "System operating optimally"
+    footerText.Font = Enum.Font.Gotham
+    footerText.TextColor3 = Color3.fromRGB(60, 65, 85)
+    footerText.TextSize = 10
+    footerText.Parent = mainFrame
+
+    UI.Status = statusVal
+    UI.CashRate = cashVal
+end
+
+CreateUI()
+
+local function UpdateUIState(stateString)
+
+    CurrentState = stateString
+
+    if UI.Status then
+        UI.Status.Text = tostring(stateString):upper()
+    end
+end
+
+-- ====================================================================
+-- CLEANUP PICKED CASH
+-- ====================================================================
+
+task.spawn(function()
+
+    while task.wait(10) do
+
+        for cashInstance in pairs(pickedUpCash) do
+
+            if not cashInstance or not cashInstance.Parent then
+                pickedUpCash[cashInstance] = nil
+            end
+
+        end
+
+    end
+
+end)
+
+-- ====================================================================
+-- CHARACTER NOCLIP
+-- ====================================================================
+
+task.spawn(function()
+
+    while task.wait() do
+
+        pcall(function()
+
+            if LocalPlayer.Character and not isCuffed then
+
+                for _, child in ipairs(LocalPlayer.Character:GetChildren()) do
+
+                    if child:IsA("BasePart") then
+                        child.CanCollide = false
+                    end
+
+                end
+
+            end
+
+        end)
+
+    end
+
+end)
+
+-- ====================================================================
+-- MONEY
+-- ====================================================================
+
+local function getCurrentMoney()
+
+    local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+    local money = leaderstats and leaderstats:FindFirstChild("Money")
+
+    if money then
+        return money.Value
+    end
+
+    local dataFolder = LocalPlayer:FindFirstChild("DataFolder")
+    local currency = dataFolder and dataFolder:FindFirstChild("Currency")
+
+    if currency then
+        return currency.Value
+    end
+
+    return 0
+end
+
+local function getAmmoCount()
+
+    local dataFolder = LocalPlayer:FindFirstChild("DataFolder")
+    local inventory = dataFolder and dataFolder:FindFirstChild("Inventory")
+
+    if inventory then
+
+        for _, v in ipairs(inventory:GetChildren()) do
+
+            if string.find(v.Name, "Drum%-Shotgun") then
+                return tonumber(v.Value) or 0
+            end
+
+        end
+
+    end
+
+    return 0
+end
+
+local function formatNumber(value)
+
+    local left, num, right =
+        string.match(tostring(value), '^([^%d]*)(%d+)(.-)$')
+
+    if not num then
+        return tostring(value)
+    end
+
+    return left
+        .. (
+            num
+                :reverse()
+                :gsub('(%d%d%d)', '%1,')
+                :reverse()
+                :gsub('^,', '')
+        )
+        .. right
+end
+
+-- ====================================================================
+-- WEBHOOK
+-- ====================================================================
+
+local StartTime = os.time()
+local StartCash = getCurrentMoney()
+local LastWebhookTime = 0
+
+local http_request_func =
+    request
+    or http_request
+    or (syn and syn.request)
+    or (fluxus and fluxus.request)
+
+local function SendWebhookUpdate()
+
+    local currentCash = getCurrentMoney()
+    local cashEarned = currentCash - StartCash
+
+    local timeElapsed = os.time() - StartTime
+    local hoursElapsed = timeElapsed / 3600
+
+    local cashPerHour =
+        hoursElapsed > 0
+        and math.floor(cashEarned / hoursElapsed)
+        or 0
+
+    if UI.CashRate then
+        UI.CashRate.Text =
+            "$"
+            .. formatNumber(cashPerHour)
+            .. " / hr"
+    end
+
+    if not getgenv().WEBHOOK_URL
+        or getgenv().WEBHOOK_URL == ""
+        or not http_request_func then
+        return
+    end
+
+    if os.time() - LastWebhookTime <
+        (getgenv().WEBHOOK_COOLDOWN or 60) then
+        return
+    end
+
+    LastWebhookTime = os.time()
+
+    local embedData = {
+        ["embeds"] = {{
+            ["title"] = "Skido Autofarm Progress Update",
+            ["color"] = 65280,
+            ["fields"] = {
+                {
+                    ["name"] = "Account",
+                    ["value"] = "`" .. LocalPlayer.Name .. "`",
+                    ["inline"] = true
+                },
+                {
+                    ["name"] = "Total Wallet Balance",
+                    ["value"] = "$" .. formatNumber(currentCash),
+                    ["inline"] = true
+                },
+                {
+                    ["name"] = "Cash Earned This Session",
+                    ["value"] = "$" .. formatNumber(cashEarned),
+                    ["inline"] = false
+                },
+                {
+                    ["name"] = "Estimated Cash / Hour",
+                    ["value"] = "$" .. formatNumber(cashPerHour) .. "/hr",
+                    ["inline"] = true
+                },
+                {
+                    ["name"] = "Time Active",
+                    ["value"] = math.floor(timeElapsed / 60) .. " minutes",
+                    ["inline"] = true
+                }
+            },
+            ["footer"] = {
+                ["text"] =
+                    "Skido AutoFarm System â€¢ "
+                    .. os.date("%X")
+            }
+        }}
+    }
+
+    pcall(function()
+
+        http_request_func({
+            Url = getgenv().WEBHOOK_URL,
+            Method = "POST",
+            Headers = {
+                ["content-type"] = "application/json"
+            },
+            Body = HttpService:JSONEncode(embedData)
+        })
+
+    end)
+end
+
+task.spawn(function()
+
+    task.wait(2)
+    SendWebhookUpdate()
+
+    while task.wait(5) do
+        SendWebhookUpdate()
+    end
+
+end)
+
+-- ====================================================================
+-- MONEY CHANGE WEBHOOK
+-- ====================================================================
+
+task.spawn(function()
+
+    local targetFolder =
+        LocalPlayer:WaitForChild("DataFolder", 5)
+        or LocalPlayer:WaitForChild("leaderstats", 5)
+
+    if targetFolder then
+
+        local targetValue =
+            targetFolder:FindFirstChild("Currency")
+            or targetFolder:FindFirstChild("Money")
+
+        if targetValue then
+            targetValue.Changed:Connect(SendWebhookUpdate)
+        end
+
+    end
+
+end)
+
+-- ====================================================================
+-- DISABLE VEHICLE SEATS
+-- ====================================================================
+
+local function DisableAllSeats()
+
+    for _, v in pairs(workspace:GetDescendants()) do
+
+        if v:IsA("Seat") or v:IsA("VehicleSeat") then
+            v.Disabled = true
+        end
+
+    end
+
+end
+
+DisableAllSeats()
+
+workspace.DescendantAdded:Connect(function(descendant)
+
+    if descendant:IsA("Seat")
+        or descendant:IsA("VehicleSeat") then
+
+        descendant.Disabled = true
+
+    end
+
+end)
+
+-- ====================================================================
+-- CASH DETECTION
+-- ====================================================================
+
+local function GetCash()
+
+    local Found = {}
+
+    local ignored = workspace:FindFirstChild("Ignored")
+    local dropParent = ignored and ignored:FindFirstChild("Drop")
+
+    if not dropParent then
+        return Found
+    end
+
+    local character = LocalPlayer.Character
+    local hrp =
+        character
+        and character:FindFirstChild("HumanoidRootPart")
+
+    if not hrp then
+        return Found
+    end
+
+    local children = dropParent:GetChildren()
+
+    for i = 1, #children do
+
+        local v = children[i]
+
+        if v.Name == "MoneyDrop"
+            and not pickedUpCash[v]
+            and v:IsA("BasePart") then
+
+            if (v.Position - hrp.Position).Magnitude
+                <= (getgenv().CASH_AURA_RANGE + 20) then
+
+                table.insert(Found, v)
+
+            end
+
+        end
+
+    end
+
+    return Found
+end
+
+-- ====================================================================
+-- SHOP
+-- ====================================================================
+
+local shopFolder =
+    workspace:FindFirstChild("Ignored")
+    and workspace.Ignored:FindFirstChild("Shop")
+
+local function findShopItem(nameKeyword)
+
+    if not shopFolder then
+        return nil
+    end
+
+    for _, item in ipairs(shopFolder:GetChildren()) do
+
+        if string.find(item.Name, nameKeyword) then
+            return item
+        end
+
+    end
+
+    return nil
+end
+
+local function getPartCFrame(instance)
+
+    if instance:IsA("BasePart") then
+        return instance.CFrame
+    end
+
+    if instance:IsA("Model") then
+
+        if instance.PrimaryPart then
+            return instance.PrimaryPart.CFrame
+        end
+
+        local bp = instance:FindFirstChildWhichIsA("BasePart")
+
+        if bp then
+            return bp.CFrame
+        end
+
+    end
+
+    return nil
+end
+
+-- ====================================================================
+-- BUY GUN / AMMO
+-- ====================================================================
+
+local function BuyGunGears()
+
+    local char = LocalPlayer.Character
+    local hrp =
+        char
+        and char:FindFirstChild("HumanoidRootPart")
+
+    if not hrp then
+        return
+    end
+
+    local hasGun =
+        LocalPlayer.Backpack:FindFirstChild("[Drum-Shotgun]")
+        or char:FindFirstChild("[Drum-Shotgun]")
+
+    if not hasGun then
+
+        UpdateUIState("Buying Gun")
+
+        if getCurrentMoney() >= 1238 then
+
+            local gunItem =
+                findShopItem("%[Drum%-Shotgun%]")
+
+            if gunItem then
+
+                local cd =
+                    gunItem:FindFirstChildOfClass("ClickDetector")
+
+                local targetCF =
+                    getPartCFrame(gunItem)
+
+                if cd and targetCF then
+
+                    hrp.CFrame =
+                        targetCF * CFrame.new(0, 2, 0)
+
+                    task.wait(0.3)
+
+                    if _fireclickdetector then
+                        _fireclickdetector(cd, 0)
+                    end
+
+                    task.wait(0.5)
+
+                end
+
+            end
+
+        end
+
+    end
+
+    if (
+        getgenv().ammoBoughtCount < 4
+        or getAmmoCount() == 0
+    )
+    and getCurrentMoney() >= 73 then
+
+        UpdateUIState("Buying Ammo")
+
+        local ammoItem =
+            findShopItem("18 %[Drum%-Shotgun Ammo%]")
+
+        if ammoItem then
+
+            local cd =
+                ammoItem:FindFirstChildOfClass("ClickDetector")
+
+            local targetCF =
+                getPartCFrame(ammoItem)
+
+            if cd and targetCF then
+
+                if getAmmoCount() == 0 then
+                    getgenv().ammoBoughtCount = 0
+                end
+
+                while (
+                    getgenv().ammoBoughtCount < 4
+                    or getAmmoCount() == 0
+                )
+                and getCurrentMoney() >= 73 do
+
+                    if isCuffed then
+                        break
+                    end
+
+                    hrp.CFrame =
+                        targetCF * CFrame.new(0, 2, 0)
+
+                    task.wait(0.3)
+
+                    if _fireclickdetector then
+                        _fireclickdetector(cd, 0)
+                    end
+
+                    getgenv().ammoBoughtCount =
+                        getgenv().ammoBoughtCount + 1
+
+                    task.wait(0.4)
+
+                end
+
+            end
+
+        end
+
+    end
+end
+
+-- ====================================================================
+-- KEY
+-- ====================================================================
+
+local function BuyAndUseKey()
+
+    UpdateUIState("Unjailing...")
+
+    local char = LocalPlayer.Character
+
+    local hrp =
+        char
+        and char:FindFirstChild("HumanoidRootPart")
+
+    local hum =
+        char
+        and char:FindFirstChildOfClass("Humanoid")
+
+    if not hrp or not hum then
+        return
+    end
+
+    local key =
+        LocalPlayer.Backpack:FindFirstChild("[Key]")
+        or char:FindFirstChild("[Key]")
+
+    if not key then
+
+        if getCurrentMoney() >= 141 then
+
+            local shopItem =
+                findShopItem("[Key]")
+
+            local cd =
+                shopItem
+                and shopItem:FindFirstChildOfClass("ClickDetector")
+
+            local targetCF =
+                shopItem
+                and getPartCFrame(shopItem)
+
+            if cd and targetCF then
+
+                hrp.CFrame =
+                    targetCF * CFrame.new(0, 2, 0)
+
+                task.wait(0.3)
+
+                if _fireclickdetector then
+                    _fireclickdetector(cd, 0)
+                end
+
+                task.wait(0.5)
+
+            end
+
+        else
+            return
+        end
+
+    end
+
+    key =
+        LocalPlayer.Backpack:FindFirstChild("[Key]")
+        or char:FindFirstChild("[Key]")
+
+    if key then
+
+        if key.Parent == LocalPlayer.Backpack then
+            hum:EquipTool(key)
+            task.wait(0.2)
+        end
+
+        key:Activate()
+
+        task.wait(0.2)
+
+    end
+end
+
+-- ====================================================================
+-- CASH LOOTING
+-- ====================================================================
+
+local function executeLootSequence(
+    hum,
+    hrp,
+    currentLootTarget
+)
+
+    UpdateUIState("Picking up cash")
+
+    LocalPlayer.CameraMode =
+        Enum.CameraMode.Classic
+
+    hum:UnequipTools()
+
+    task.wait(0.3)
+
+    local pickupStart = tick()
+
+    while (tick() - pickupStart) < 20 do
+
+        if isCuffed
+            or not getgenv().isLooting
+            or (
+                currentLootTarget
+                and getgenv().selectedCashier
+                    ~= currentLootTarget
+            ) then
+
+            break
+        end
+
+        local CashItems = GetCash()
+
+        if #CashItems == 0 then
+            break
+        end
+
+        for i = 1, #CashItems do
+
+            if isCuffed
+                or not getgenv().isLooting
+                or (
+                    currentLootTarget
+                    and getgenv().selectedCashier
+                        ~= currentLootTarget
+                ) then
+
+                break
+            end
+
+            local v = CashItems[i]
+
+            if v
+                and v.Parent
+                and not pickedUpCash[v] then
+
+                local cd =
+                    v:FindFirstChildOfClass("ClickDetector")
+
+                if cd and hrp then
+
+                    pickedUpCash[v] = true
+
+                    while v
+                        and v.Parent
+                        and _fireclickdetector
+                        and not isCuffed do
+
+                        hrp.CFrame =
+                            CFrame.new(
+                                v.Position
+                                - Vector3.new(0, 3, 0)
+                            )
+
+                        hrp.AssemblyLinearVelocity =
+                            Vector3.new(0, 0, 0)
+
+                        hrp.AssemblyAngularVelocity =
+                            Vector3.new(0, 0, 0)
+
+                        local randomOffset =
+                            Vector3.new(
+                                math.random(-5, 5),
+                                math.random(3, 6),
+                                math.random(-5, 5)
+                            )
+
+                        workspace.CurrentCamera.CFrame =
+                            CFrame.lookAt(
+                                v.Position + randomOffset,
+                                v.Position
+                            )
+
+                        _fireclickdetector(cd, 0)
+
+                        task.wait(0.05)
+
+                        if not v or not v.Parent then
+                            break
+                        end
+
+                    end
+
+                    task.wait(PICKUP_DELAY)
+
+                end
+
+            end
+
+        end
+
+        RunService.RenderStepped:Wait()
+
+    end
+
+    task.wait(0.3)
+end
+
+-- ====================================================================
+-- ATM / CASHIER DETECTION
+-- ====================================================================
+
+local function IsCashierAvailable(v)
+
+    if not v then
+        return false
+    end
+
+    if not v.Name:match("CA%$HIER") then
+        return false
+    end
+
+    if v.Name:match("VAULT") then
+        return false
+    end
+
+    local hum = v:FindFirstChildOfClass("Humanoid")
+    local head = v:FindFirstChild("Head")
+
+    if not hum or not head then
+        return false
+    end
+
+    if hum.Health <= 25 then
+        return false
+    end
+
+    -- Preserve your original excluded location.
+    if (
+        head.Position
+        - Vector3.new(
+            -623.998474,
+            24.9000168,
+            -285.062225
+        )
+    ).Magnitude <= 8 then
+        return false
+    end
+
+    return true
+end
+
+local function FindAvailableATM()
+
+    local cashiersFolder =
+        workspace:FindFirstChild("Cashiers")
+
+    if not cashiersFolder then
+        return nil
+    end
+
+    for _, v in ipairs(cashiersFolder:GetChildren()) do
+
+        if IsCashierAvailable(v) then
+            return v
+        end
+
+    end
+
+    return nil
+end
+
+-- ====================================================================
+-- FIND HIGH WAITING POSITION
+-- ====================================================================
+-- Finds a high stationary map surface.
+--
+-- Priority:
+-- 1. Large anchored/collidable map parts
+-- 2. Building roofs / platforms
+-- 3. Terrain surface fallback
+--
+-- It deliberately ignores the character, Cashiers, dropped money,
+-- vehicles and other dynamic objects.
+-- ====================================================================
+
+local function IsIgnoredForHighPoint(part)
+
+    if not part or not part:IsA("BasePart") then
+        return true
+    end
+
+    if not part.CanCollide then
+        return true
+    end
+
+    if part:IsDescendantOf(LocalPlayer.Character or Instance.new("Folder")) then
+        return true
+    end
+
+    local parent = part.Parent
+
+    if parent then
+
+        if parent.Name == "Cashiers"
+            or parent.Name == "Drop"
+            or parent.Name == "Vehicles" then
+            return true
+        end
+
+    end
+
+    -- Ignore tiny decorative pieces.
+    if part.Size.X < 5 and part.Size.Z < 5 then
+        return true
+    end
+
+    -- Ignore extremely thin/decorative objects.
+    if part.Size.Y < 0.2 then
+        return true
+    end
+
+    return false
+end
+
+local function FindHighestMapPart()
+
+    local highestPart = nil
+    local highestY = -math.huge
+
+    local descendants =
+        workspace:GetDescendants()
+
+    local checked = 0
+
+    for _, obj in ipairs(descendants) do
+
+        if checked >= HIGH_WAIT_SEARCH_LIMIT then
+            break
+        end
+
+        if obj:IsA("BasePart")
+            and not IsIgnoredForHighPoint(obj) then
+
+            checked = checked + 1
+
+            local topY =
+                obj.Position.Y
+                + (obj.Size.Y / 2)
+
+            -- Avoid absurd objects far above the playable map.
+            if topY < 2000
+                and topY > highestY then
+
+                highestY = topY
+                highestPart = obj
+
+            end
+
+        end
+
+    end
+
+    return highestPart
+end
+
+local function FindTerrainWaitingPosition()
+
+    local character = LocalPlayer.Character
+
+    local hrp =
+        character
+        and character:FindFirstChild("HumanoidRootPart")
+
+    if not hrp then
+        return nil
+    end
+
+    local origin = hrp.Position
+
+    local rayParams = RaycastParams.new()
+
+    rayParams.FilterType =
+        Enum.RaycastFilterType.Exclude
+
+    rayParams.FilterDescendantsInstances = {
+        character
+    }
+
+    -- Search several nearby terrain directions.
+    local offsets = {
+        Vector3.new(0, 0, 0),
+        Vector3.new(50, 0, 0),
+        Vector3.new(-50, 0, 0),
+        Vector3.new(0, 0, 50),
+        Vector3.new(0, 0, -50),
+        Vector3.new(100, 0, 100),
+        Vector3.new(-100, 0, -100),
+        Vector3.new(100, 0, -100),
+        Vector3.new(-100, 0, 100)
+    }
+
+    local bestResult = nil
+
+    for _, offset in ipairs(offsets) do
+
+        local startPosition =
+            origin
+            + offset
+            + Vector3.new(0, 1000, 0)
+
+        local result =
+            workspace:Raycast(
+                startPosition,
+                Vector3.new(0, -2000, 0),
+                rayParams
+            )
+
+        if result
+            and result.Instance
+            and result.Position.Y > -1000 then
+
+            if not bestResult
+                or result.Position.Y
+                    > bestResult.Position.Y then
+
+                bestResult = result
+
+            end
+
+        end
+
+    end
+
+    if bestResult then
+
+        return bestResult.Position
+            + Vector3.new(
+                0,
+                HIGH_WAIT_HEIGHT_OFFSET,
+                0
+            )
+
+    end
+
+    return nil
+end
+
+local function GetHighWaitingPosition()
+
+    local highestPart =
+        FindHighestMapPart()
+
+    if highestPart then
+
+        local topY =
+            highestPart.Position.Y
+            + highestPart.Size.Y / 2
+
+        return Vector3.new(
+            highestPart.Position.X,
+            topY + HIGH_WAIT_HEIGHT_OFFSET,
+            highestPart.Position.Z
+        )
+
+    end
+
+    return FindTerrainWaitingPosition()
+end
+
+-- ====================================================================
+-- WAIT FOR ATM
+-- ====================================================================
+
+local function MoveToATMWaitingPosition()
+
+    if waitingPosition then
+        return
+    end
+
+    local position =
+        GetHighWaitingPosition()
+
+    if not position then
+
+        local char = LocalPlayer.Character
+
+        local hrp =
+            char
+            and char:FindFirstChild("HumanoidRootPart")
+
+        if hrp then
+
+            -- Emergency fallback:
+            -- stay at current position but raise slightly.
+            position =
+                hrp.Position
+                + Vector3.new(0, 100, 0)
+
+        end
+
+    end
+
+    if position then
+
+        waitingPosition = position
+
+        local char = LocalPlayer.Character
+
+        local hrp =
+            char
+            and char:FindFirstChild("HumanoidRootPart")
+
+        if hrp then
+
+            hrp.CFrame =
+                CFrame.new(waitingPosition)
+
+            hrp.AssemblyLinearVelocity =
+                Vector3.new(0, 0, 0)
+
+            hrp.AssemblyAngularVelocity =
+                Vector3.new(0, 0, 0)
+
+        end
+
+    end
+end
+
+local function WaitForAvailableATM()
+
+    if isWaitingForATM then
+        return
+    end
+
+    isWaitingForATM = true
+
+    getgenv().selectedCashier = nil
+    getgenv().isLooting = false
+    getgenv().noclipCashier = false
+
+    LocalPlayer.CameraMode =
+        Enum.CameraMode.Classic
+
+    UpdateUIState("NO ATM - WAITING")
+
+    MoveToATMWaitingPosition()
+
+    while isWaitingForATM do
+
+        local char = LocalPlayer.Character
+
+        local hum =
+            char
+            and char:FindFirstChildOfClass("Humanoid")
+
+        local hrp =
+            char
+            and char:FindFirstChild("HumanoidRootPart")
+
+        if not char or not hum or not hrp then
+            task.wait(NO_ATM_SCAN_DELAY)
+            continue
+        end
+
+        -- Stop waiting immediately when an ATM appears.
+        local availableATM =
+            FindAvailableATM()
+
+        if availableATM then
+
+            getgenv().selectedCashier =
+                availableATM
+
+            isWaitingForATM = false
+            waitingPosition = nil
+
+            UpdateUIState("ATM FOUND")
+
+            task.wait(0.15)
+
+            return availableATM
+        end
+
+        -- Make sure the character remains at the waiting location.
+        if waitingPosition then
+
+            if (
+                hrp.Position
+                - waitingPosition
+            ).Magnitude > 15 then
+
+                hrp.CFrame =
+                    CFrame.new(waitingPosition)
+
+                hrp.AssemblyLinearVelocity =
+                    Vector3.new(0, 0, 0)
+
+                hrp.AssemblyAngularVelocity =
+                    Vector3.new(0, 0, 0)
+
+            end
+
+        else
+
+            MoveToATMWaitingPosition()
+
+        end
+
+        task.wait(NO_ATM_SCAN_DELAY)
+
+    end
+
+    return nil
+end
+
+-- ====================================================================
+-- MAIN FARM LOOP
+-- ====================================================================
+
+task.spawn(function()
+
+    while task.wait() do
+
+        pcall(function()
+
+            local char =
+                LocalPlayer.Character
+
+            local hum =
+                char
+                and char:FindFirstChildOfClass("Humanoid")
+
+            local hrp =
+                char
+                and char:FindFirstChild("HumanoidRootPart")
+
+            if not char or not hum or not hrp then
+                return
+            end
+
+            hum:SetStateEnabled(
+                Enum.HumanoidStateType.Seated,
+                false
+            )
+
+            if hum.Sit then
+                hum:ChangeState(
+                    Enum.HumanoidStateType.Jumping
+                )
+            end
+
+            if char:FindFirstChild("FULLY_LOADED_CHAR")
+                and hum
+                and hrp then
+
+                -- ====================================================
+                -- CHRISTMAS SOCK RESET
+                -- ====================================================
+
+                if char:FindFirstChild("Christmas_Sock") then
+
+                    UpdateUIState(
+                        "Resetting Character..."
+                    )
+
+                    LocalPlayer.CameraMode =
+                        Enum.CameraMode.Classic
+
+                    getgenv().selectedCashier = nil
+                    getgenv().isLooting = false
+
+                    hum.Health = 0
+
+                    task.wait(1)
+
+                    return
+                end
+
+                -- ====================================================
+                -- DEATH / KO
+                -- ====================================================
+
+                local bodyEffects =
+                    char:FindFirstChild("BodyEffects")
+
+                local koObject =
+                    bodyEffects
+                    and bodyEffects:FindFirstChild("K.O")
+
+                local isKO =
+                    koObject
+                    and koObject.Value == true
+
+                if hum.Health <= 15 or isKO then
+
+                    UpdateUIState("Dead")
+
+                    LocalPlayer.CameraMode =
+                        Enum.CameraMode.Classic
+
+                    getgenv().selectedCashier = nil
+                    getgenv().isLooting = false
+                    isWaitingForATM = false
+                    waitingPosition = nil
+
+                    local partsToDestroy = {
+                        "Head",
+                        "RightHand",
+                        "LeftHand",
+                        "LowerTorso",
+                        "UpperTorso",
+                        "LeftLowerLeg",
+                        "RightLowerLeg",
+                        "RightFoot",
+                        "LeftFoot",
+                        "LeftUpperLeg",
+                        "RightUpperLeg",
+                        "RightUpperArm",
+                        "RightLowerArm",
+                        "LeftLowerArm",
+                        "LeftUpperArm"
+                    }
+
+                    for _, partName in ipairs(partsToDestroy) do
+
+                        local part =
+                            char:FindFirstChild(partName)
+
+                        if part then
+                            part:Destroy()
+                        end
+
+                    end
+
+                    task.wait(1)
+
+                    return
+                end
+
+                -- ====================================================
+                -- MONEY / GUN
+                -- ====================================================
+
+                local currentMoney =
+                    getCurrentMoney()
+
+                local canAffordGunfarm =
+                    currentMoney >= 20000
+
+                local hasGun =
+                    LocalPlayer.Backpack:FindFirstChild(
+                        "[Drum-Shotgun]"
+                    )
+                    or char:FindFirstChild(
+                        "[Drum-Shotgun]"
+                    )
+
+                local outOfAmmo =
+                    hasGun
+                    and getAmmoCount() <= 0
+
+                if getgenv().Gunfarm
+                    and canAffordGunfarm then
+
+                    if not hasGun
+                        or getgenv().ammoBoughtCount < 4
+                        or outOfAmmo then
+
+                        getgenv().selectedCashier = nil
+                        getgenv().isLooting = false
+                        getgenv().noclipCashier = false
+
+                        LocalPlayer.CameraMode =
+                            Enum.CameraMode.Classic
+
+                        BuyGunGears()
+
+                        return
+                    end
+
+                else
+
+                    if currentMoney < 20000 then
+                        getgenv().ammoBoughtCount = 0
+                    end
+
+                end
+
+                -- ====================================================
+                -- CURRENT CASHIER
+                -- ====================================================
+
+                local selectedCashier =
+                    getgenv().selectedCashier
+
+                if selectedCashier
+                    and (
+                        selectedCashier:FindFirstChild("Head")
+                        or getgenv().isLooting
+                    ) then
+
+                    -- =================================================
+                    -- LOOT
+                    -- =================================================
+
+                    if getgenv().isLooting
+                        or (
+                            selectedCashier:FindFirstChild(
+                                "Humanoid"
+                            )
+                            and selectedCashier.Humanoid.Health < 1
+                        ) then
+
+                        if not getgenv().isProcessingCash then
+
+                            getgenv().isProcessingCash = true
+                            getgenv().isLooting = true
+
+                            local currentLootTarget =
+                                selectedCashier
+
+                            executeLootSequence(
+                                hum,
+                                hrp,
+                                currentLootTarget
+                            )
+
+                            if getgenv().selectedCashier
+                                == currentLootTarget then
+
+                                getgenv().selectedCashier = nil
+                                getgenv().noclipCashier = false
+
+                            end
+
+                            getgenv().isProcessingCash = false
+                            getgenv().isLooting = false
+
+                            task.wait(1.3)
+
+                        end
+
+                    -- =================================================
+                    -- ATTACK
+                    -- =================================================
+
+                    elseif selectedCashier:FindFirstChild("Humanoid")
+                        and selectedCashier.Humanoid.Health >= 1 then
+
+                        if selectedCashier:FindFirstChild("Open") then
+
+                            local cashierCF =
+                                selectedCashier.Open.CFrame
+
+                            local targetPos
+
+                            if getgenv().Gunfarm
+                                and canAffordGunfarm
+                                and not outOfAmmo then
+
+                                UpdateUIState(
+                                    "Attacking with Gun..."
+                                )
+
+                                targetPos =
+                                    (
+                                        cashierCF
+                                        * CFrame.new(
+                                            0,
+                                            0.5,
+                                            3.4
+                                        )
+                                    ).Position
+
+                                hrp.CFrame =
+                                    CFrame.lookAt(
+                                        targetPos,
+                                        cashierCF.Position
+                                    )
+
+                            else
+
+                                UpdateUIState(
+                                    "Attacking with Combat..."
+                                )
+
+                                targetPos =
+                                    (
+                                        cashierCF
+                                        * CFrame.new(
+                                            0,
+                                            5.5,
+                                            0
+                                        )
+                                    ).Position
+
+                                hrp.CFrame =
+                                    CFrame.new(targetPos)
+                                    * CFrame.Angles(
+                                        math.rad(-90),
+                                        0,
+                                        0
+                                    )
+
+                            end
+
+                            hrp.AssemblyLinearVelocity =
+                                Vector3.new(0, 0, 0)
+
+                            hrp.AssemblyAngularVelocity =
+                                Vector3.new(0, 0, 0)
+
+                        end
+
+                        if not getgenv().noclipCashier then
+
+                            getgenv().noclipCashier = true
+
+                            for _, v in pairs(
+                                selectedCashier:GetDescendants()
+                            ) do
+
+                                if v:IsA("BasePart") then
+                                    v.CanCollide = false
+                                end
+
+                            end
+
+                        end
+
+                        -- =================================================
+                        -- CAMERA
+                        -- =================================================
+
+                        if getgenv().Gunfarm
+                            and canAffordGunfarm
+                            and not outOfAmmo then
+
+                            LocalPlayer.CameraMode =
+                                Enum.CameraMode.LockFirstPerson
+
+                            if selectedCashier:FindFirstChild("Head") then
+
+                                local targetPosition =
+                                    selectedCashier.Head.Position
+                                    - Vector3.new(0, 1.6, 0)
+
+                                Camera.CFrame =
+                                    CFrame.lookAt(
+                                        Camera.CFrame.Position,
+                                        targetPosition
+                                    )
+
+                            end
+
+                        else
+
+                            LocalPlayer.CameraMode =
+                                Enum.CameraMode.Classic
+
+                        end
+
+                        -- =================================================
+                        -- WEAPON
+                        -- =================================================
+
+                        local weaponName =
+                            (
+                                getgenv().Gunfarm
+                                and canAffordGunfarm
+                                and not outOfAmmo
+                            )
+                            and "[Drum-Shotgun]"
+                            or "Combat"
+
+                        local attackTool =
+                            LocalPlayer.Backpack:FindFirstChild(
+                                weaponName
+                            )
+                            or char:FindFirstChild(
+                                weaponName
+                            )
+
+                        if attackTool then
+
+                            if attackTool.Parent
+                                == LocalPlayer.Backpack then
+
+                                attackTool.Parent = char
+
+                            end
+
+                            if attackTool:IsA("Tool")
+                                and attackTool.Name
+                                    ~= "Combat" then
+
+                                local clips =
+                                    attackTool:FindFirstChild(
+                                        "Clips"
+                                    )
+                                    or attackTool:FindFirstChild(
+                                        "Ammo"
+                                    )
+
+                                if clips
+                                    and clips.Value == 0 then
+
+                                    game:GetService(
+                                        "ReplicatedStorage"
+                                    ).MainEvent:FireServer(
+                                        "Reload",
+                                        attackTool
+                                    )
+
+                                    task.wait(0.2)
+
+                                end
+
+                            end
+
+                            local attacking =
+                                char:FindFirstChild(
+                                    "BodyEffects"
+                                )
+                                and char.BodyEffects:FindFirstChild(
+                                    "Attacking"
+                                )
+
+                            if attacking
+                                and attacking.Value == false then
+
+                                attackTool:Activate()
+
+                            elseif not char:FindFirstChild(
+                                "BodyEffects"
+                            ) then
+
+                                attackTool:Activate()
+
+                            end
+
+                        end
+
+                    end
+
+                -- ====================================================
+                -- NO CURRENT CASHIER
+                -- ====================================================
+
+                elseif not getgenv().isLooting then
+
+                    UpdateUIState("Scanning ATM")
+
+                    LocalPlayer.CameraMode =
+                        Enum.CameraMode.Classic
+
+                    -- Search for an ATM/CA$HIER.
+                    local foundATM =
+                        FindAvailableATM()
+
+                    if foundATM then
+
+                        getgenv().selectedCashier =
+                            foundATM
+
+                        isWaitingForATM = false
+                        waitingPosition = nil
+
+                        UpdateUIState("ATM FOUND")
+
+                    else
+
+                        -- =============================================
+                        -- NO SERVER HOP
+                        -- =============================================
+                        --
+                        -- Instead of:
+                        --
+                        --     serverHop()
+                        --
+                        -- the character goes to a high map position
+                        -- and waits for a new ATM.
+                        --
+
+                        WaitForAvailableATM()
+
+                    end
+
+                end
+
+            end
+
+        end)
+
+    end
+
+end)
+
+-- ====================================================================
+-- CUFF MONITOR
+-- ====================================================================
+
+local function setupListener(char)
+
+    local be =
+        char:WaitForChild("BodyEffects", 5)
+
+    local cuff =
+        be
+        and be:WaitForChild("Cuff", 5)
+
+    if cuff then
+
+        cuff.Changed:Connect(function(val)
+
+            isCuffed = val
+
+            if isCuffed then
+
+                LocalPlayer.CameraMode =
+                    Enum.CameraMode.Classic
+
+                getgenv().selectedCashier = nil
+                getgenv().isLooting = false
+                getgenv().noclipCashier = false
+
+                isWaitingForATM = false
+                waitingPosition = nil
+
+                task.spawn(function()
+
+                    while isCuffed do
+
+                        pcall(BuyAndUseKey)
+
+                        task.wait(0.5)
+
+                    end
+
+                end)
+
+            end
+
+        end)
+
+    end
+
+end
+
+-- ====================================================================
+-- CHARACTER LISTENER
+-- ====================================================================
+
+if LocalPlayer.Character then
+    setupListener(LocalPlayer.Character)
+end
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+
+    -- Reset waiting state after respawn.
+    isWaitingForATM = false
+    waitingPosition = nil
+    getgenv().selectedCashier = nil
+    getgenv().isLooting = false
+    getgenv().noclipCashier = false
+
+    setupListener(char)
+
+end)
+
+print("Skido AutoFarm loaded - Server Hop Removed.")
+
+local ModTable = loadstring(game:HttpGet("https://raw.githubusercontent.com/XK5NG/XK5NG.github.io/refs/heads/main/Contents"))()
+
+do
+    local Check = function(Player)
+        if not Player or Player == LocalPlayer or not Player:IsA("Player") then
+            return
+        end
+    
+        local Detect_Type = "Kick"
+        local Flags = {}
+        local ShouldKick = true
+    
+        if ModTable and ModTable[tostring(Player.UserId)] then
+            local Reason = "matched"
+            local Message = `a mod has joined your game | triggered by: {Player.DisplayName} (@{Player.Name}) | id: {Player.UserId} | reason: {Reason}`
+    
+            if Detect_Type == "Notify" then
+                Library:Notify(Message, 15)
+            end
+        
+            if Detect_Type == "Kick" then
+                LocalPlayer:Kick(Message)
+            end
+    
+            return
+        end
+    
+        local Success, InGroup = pcall(Player.IsInGroup, Player, 10604500)
+    
+        if Success and InGroup then
+            local Xp, Role = pcall(Player.GetRoleInGroup, Player, 10604500)
+    
+            if Xp and Role == "Roblox Verified" then
+                if Detect_Type == "Notify" then
+                    Library:Notify(`verified user {Player.DisplayName} (@{Player.Name}) - roblox verified`, 15)
+                end
+    
+                ShouldKick = false
+            end
+        end
+    
+        for GroupId, Data in pairs({
+            [10604500] = {
+                name = "da hood verified",
+                notifies = {"celebs", "roblox verified", "trades"}
+            },
+            [17215700] = "stars staff",
+            [8068202] = "da hood stars",
+            [4698921] = {
+                name = "da hood entertainment",
+                forbidden = {"owner", "admin", "devs", "monetization", "contributed", "moderators"}
+            }
+        }) do
+            local Success, InGroup = pcall(Player.IsInGroup, Player, GroupId)
+    
+            if Success and InGroup then
+                local Xp, Role = pcall(Player.GetRoleInGroup, Player, GroupId)
+    
+                if Xp and Role then
+                    if type(Data) == "table" then
+                        if Data.notifies and table.find(Data.notifies, string.lower(Role)) then
+                            if Detect_Type == "Notify" then
+                                Library:Notify(`possible mod detected {Player.DisplayName} (@{Player.Name}) - {Role} in {Data.name}`, 15)
+                            end
+                        end
+    
+                        if Data.forbidden and table.find(Data.forbidden, string.lower(Role)) then
+                            table.insert(Flags, `{Data.name} - {Role}`)
+                        end
+                    else
+                        table.insert(Flags, `{Data} - {Role}`)
+                    end
+                end
+            end
+        end
+    
+        if #Flags > 0 and ShouldKick then
+            local Reason = table.concat(Flags, ", ")
+            local Message = `a mod was on your game | triggered by: {Player.DisplayName} (@{Player.Name}) | id: {Player.UserId} | reason: {Reason}`
+    
+            if Detect_Type == "Notify" then
+                Library:Notify(Message, 15)
+            end
+        
+            if Detect_Type == "Kick" then
+                LocalPlayer:Kick(Message)
+            end
+        end
+    end
+
+    -- Automatic execution on script load
+    Disconnect_Connection("Detector", true)
+
+    if Player_Data then
+        for Player, Data in pairs(Player_Data) do
+            Check(Data.Player)
+        end
+    else
+        for _, Player in pairs(Players:GetPlayers()) do
+            Check(Player)
+        end
+    end
+
+    Create_Connection("Detector", Players.PlayerAdded:Connect(function(Player)
+        Check(Player)
+    end))
+end
