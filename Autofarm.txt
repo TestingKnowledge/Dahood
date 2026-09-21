@@ -1,3 +1,38 @@
+-- 1. Wait for the game itself to load FIRST
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+-- 2. Safely get Services (Auto-exec can error if you use game.Players directly)
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+-- 3. Safely wait for the LocalPlayer to exist
+-- Auto-exec scripts often run before the LocalPlayer object is created
+local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do
+    Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+    LocalPlayer = Players.LocalPlayer
+end
+
+-- 4. Camera is safe to grab now that the Workspace has loaded
+local Camera = Workspace.CurrentCamera
+
+-- 5. Safely get the Character
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+
+-- 6. Wait for the game's custom loaded state
+-- Note: Increased timeout to 300 seconds. Auto-exec runs on game launch, 
+-- meaning it has to wait through the Roblox loading screen. 30 seconds is often too short for slower PCs.
+local fullyLoadedChar = Character:WaitForChild("FULLY_LOADED_CHAR", 300)
+
+if not fullyLoadedChar then
+    warn("Auto-exec aborted: Timed out waiting for FULLY_LOADED_CHAR.")
+    return -- Halts the script entirely, nothing below this line will run
+end
+
+
+
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local RunService = game:GetService("RunService")
