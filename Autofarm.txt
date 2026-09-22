@@ -27,44 +27,65 @@ if not fullyLoadedChar then
 end
 
 -- ====================================================================
--- 2. ALT COLLISION & PRIORITY SERVER HOPPING
+-- 2. FILTERED SERVER HOPPING (Min 2, Max 20 Players)
 -- ====================================================================
 local isServerHopping = false
 
-local function SafeServerHop()
+local function ServerHop()
     if isServerHopping then return end
     isServerHopping = true
 
-    print("[Alt Detector] Initiating Server Hop...")
+    if UpdateUIState then
+        UpdateUIState("Hopping (No ATM / Alt)")
+    end
+
+    print("[Server Hop] Looking for server (Players: 2 - 20)...")
 
     local PlaceId = game.PlaceId
     local JobId = game.JobId
 
-    pcall(function()
-        local req = game:HttpGet("https://games.roblox.com/v1/games/" .. PlaceId .. "/servers/0?sortOrder=Asc&limit=100")
-        local body = HttpService:JSONDecode(req)
-        
-        local validServers = {}
-        if body and body.data then
-            for _, server in ipairs(body.data) do
-                if type(server) == "table" and server.playing < server.maxPlayers and server.id ~= JobId then
-                    table.insert(validServers, server.id)
+    task.spawn(function()
+        pcall(function()
+            local cursor = ""
+            local validServers = {}
+
+            -- Fetch up to 100 public servers
+            local req = game:HttpGet("https://games.roblox.com/v1/games/" .. PlaceId .. "/servers/0?sortOrder=Desc&limit=100")
+            local body = HttpService:JSONDecode(req)
+
+            if body and body.data then
+                for _, server in ipairs(body.data) do
+                    if type(server) == "table" and server.id ~= JobId then
+                        local playerCount = server.playing or 0
+                        local maxPlayers = server.maxPlayers or 40
+
+                        -- Target servers between 2 and 20 players that aren't full
+                        if playerCount >= 2 and playerCount <= 25 and playerCount < maxPlayers then
+                            table.insert(validServers, server.id)
+                        end
+                    end
                 end
             end
-        end
 
-        if #validServers > 0 then
-            TeleportService:TeleportToPlaceInstance(PlaceId, validServers[math.random(1, #validServers)], LocalPlayer)
-        else
-            TeleportService:Teleport(PlaceId, LocalPlayer)
-        end
-    end)
+            if #validServers > 0 then
+                local targetServer = validServers[math.random(1, #validServers)]
+                print("[Server Hop] Teleporting to valid server:", targetServer)
+                TeleportService:TeleportToPlaceInstance(PlaceId, targetServer, LocalPlayer)
+            else
+                print("[Server Hop] No server matching 2-20 players found. Fallback teleport...")
+                TeleportService:Teleport(PlaceId, LocalPlayer)
+            end
+        end)
 
-    task.delay(10, function()
-        isServerHopping = false
+        task.delay(10, function()
+            isServerHopping = false
+        end)
     end)
 end
 
+-- ====================================================================
+-- 3. ALT COLLISION DETECTION
+-- ====================================================================
 local function isAltAccount(player)
     if not player or player == LocalPlayer or not getgenv().AltAccounts then
         return false
@@ -88,15 +109,14 @@ local function checkAltCollision(player)
         -- TIE-BREAKER: Higher UserId hops, Lower UserId stays
         if LocalPlayer.UserId > player.UserId then
             print("[Alt Detector] LocalPlayer has higher UserId. Leaving server...")
-            task.wait(math.random(1, 2)) -- Jitter delay to prevent simultaneous network triggers
-            SafeServerHop()
+            task.wait(math.random(1, 2))
+            ServerHop()
         else
             print("[Alt Detector] LocalPlayer has lower UserId. Remaining in server.")
         end
     end
 end
 
--- Check existing players and monitor new joins
 for _, player in ipairs(Players:GetPlayers()) do
     checkAltCollision(player)
 end
@@ -106,7 +126,7 @@ Players.PlayerAdded:Connect(function(player)
 end)
 
 -- ====================================================================
--- 3. DISCONNECT / ERROR RECOVERY
+-- 4. DISCONNECT / ERROR RECOVERY
 -- ====================================================================
 local rejoinInProgress = false
 local teleportAttempted = false
@@ -189,7 +209,7 @@ task.spawn(function()
 end)
 
 -- ====================================================================
--- 4. CONFIG & GLOBALS
+-- 5. CONFIG & GLOBALS
 -- ====================================================================
 local PICKUP_DELAY = 0.2
 local _fireclickdetector = fireclickdetector or (syn and syn.fire_click_detector)
@@ -206,15 +226,8 @@ getgenv().isLooting = false
 getgenv().CASH_AURA_RANGE = 10
 getgenv().ammoBoughtCount = 0
 
-local NO_ATM_SCAN_DELAY = 2
-local HIGH_WAIT_HEIGHT_OFFSET = 4
-local HIGH_WAIT_SEARCH_LIMIT = 5000
-
-local isWaitingForATM = false
-local waitingPosition = nil
-
 -- ====================================================================
--- 5. GPU SAVER / WHITE SCREEN
+-- 6. GPU SAVER / WHITE SCREEN
 -- ====================================================================
 if getgenv().Whitescreen then
     task.spawn(function()
@@ -237,7 +250,7 @@ if getgenv().Whitescreen then
 end
 
 -- ====================================================================
--- 6. USER INTERFACE
+-- 7. USER INTERFACE
 -- ====================================================================
 local UI = {}
 
@@ -382,7 +395,7 @@ end
 
 CreateUI()
 
-local function UpdateUIState(stateString)
+function UpdateUIState(stateString)
     CurrentState = stateString
     if UI.Status then
         UI.Status.Text = tostring(stateString):upper()
@@ -390,7 +403,7 @@ local function UpdateUIState(stateString)
 end
 
 -- ====================================================================
--- 7. UTILITIES & NOCLIP
+-- 8. UTILITIES & NOCLIP
 -- ====================================================================
 task.spawn(function()
     while task.wait(10) do
@@ -448,7 +461,7 @@ local function formatNumber(value)
 end
 
 -- ====================================================================
--- 8. WEBHOOKS
+-- 9. WEBHOOKS
 -- ====================================================================
 local StartTime = os.time()
 local StartCash = getCurrentMoney()
@@ -521,7 +534,7 @@ task.spawn(function()
 end)
 
 -- ====================================================================
--- 9. GAME WORLD HELPERS & SHOPS
+-- 10. GAME WORLD HELPERS & SHOPS
 -- ====================================================================
 local function DisableAllSeats()
     for _, v in pairs(workspace:GetDescendants()) do
@@ -665,7 +678,7 @@ local function BuyAndUseKey()
 end
 
 -- ====================================================================
--- 10. CASH LOOTING & ATM SCANNING
+-- 11. CASH LOOTING & ATM SCANNING
 -- ====================================================================
 local function executeLootSequence(hum, hrp, currentLootTarget)
     UpdateUIState("Picking up cash")
@@ -731,148 +744,8 @@ local function FindAvailableATM()
     return nil
 end
 
-local function IsIgnoredForHighPoint(part)
-    if not part or not part:IsA("BasePart") or not part.CanCollide then return true end
-    if part:IsDescendantOf(LocalPlayer.Character or Instance.new("Folder")) then return true end
-    local parent = part.Parent
-    if parent and (parent.Name == "Cashiers" or parent.Name == "Drop" or parent.Name == "Vehicles") then return true end
-    if part.Size.X < 5 and part.Size.Z < 5 then return true end
-    if part.Size.Y < 0.2 then return true end
-    return false
-end
-
-local function FindHighestMapPart()
-    local highestPart = nil
-    local highestY = -math.huge
-    local descendants = workspace:GetDescendants()
-    local checked = 0
-
-    for _, obj in ipairs(descendants) do
-        if checked >= HIGH_WAIT_SEARCH_LIMIT then break end
-        if obj:IsA("BasePart") and not IsIgnoredForHighPoint(obj) then
-            checked = checked + 1
-            local topY = obj.Position.Y + (obj.Size.Y / 2)
-            if topY < 2000 and topY > highestY then
-                highestY = topY
-                highestPart = obj
-            end
-        end
-    end
-    return highestPart
-end
-
-local function FindTerrainWaitingPosition()
-    local character = LocalPlayer.Character
-    local hrp = character and character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return nil end
-
-    local origin = hrp.Position
-    local rayParams = RaycastParams.new()
-    rayParams.FilterType = Enum.RaycastFilterType.Exclude
-    rayParams.FilterDescendantsInstances = { character }
-
-    local offsets = {
-        Vector3.new(0, 0, 0), Vector3.new(50, 0, 0), Vector3.new(-50, 0, 0),
-        Vector3.new(0, 0, 50), Vector3.new(0, 0, -50), Vector3.new(100, 0, 100),
-        Vector3.new(-100, 0, -100), Vector3.new(100, 0, -100), Vector3.new(-100, 0, 100)
-    }
-
-    local bestResult = nil
-    for _, offset in ipairs(offsets) do
-        local startPosition = origin + offset + Vector3.new(0, 1000, 0)
-        local result = workspace:Raycast(startPosition, Vector3.new(0, -2000, 0), rayParams)
-        if result and result.Instance and result.Position.Y > -1000 then
-            if not bestResult or result.Position.Y > bestResult.Position.Y then
-                bestResult = result
-            end
-        end
-    end
-
-    if bestResult then
-        return bestResult.Position + Vector3.new(0, HIGH_WAIT_HEIGHT_OFFSET, 0)
-    end
-    return nil
-end
-
-local function GetHighWaitingPosition()
-    local highestPart = FindHighestMapPart()
-    if highestPart then
-        local topY = highestPart.Position.Y + highestPart.Size.Y / 2
-        return Vector3.new(highestPart.Position.X, topY + HIGH_WAIT_HEIGHT_OFFSET, highestPart.Position.Z)
-    end
-    return FindTerrainWaitingPosition()
-end
-
-local function MoveToATMWaitingPosition()
-    if waitingPosition then return end
-    local position = GetHighWaitingPosition()
-    if not position then
-        local char = LocalPlayer.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if hrp then position = hrp.Position + Vector3.new(0, 100, 0) end
-    end
-
-    if position then
-        waitingPosition = position
-        local char = LocalPlayer.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if hrp then
-            hrp.CFrame = CFrame.new(waitingPosition)
-            hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-            hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-        end
-    end
-end
-
-local function WaitForAvailableATM()
-    if isWaitingForATM then return end
-    isWaitingForATM = true
-
-    getgenv().selectedCashier = nil
-    getgenv().isLooting = false
-    getgenv().noclipCashier = false
-    LocalPlayer.CameraMode = Enum.CameraMode.Classic
-
-    UpdateUIState("NO ATM - WAITING")
-    MoveToATMWaitingPosition()
-
-    while isWaitingForATM do
-        local char = LocalPlayer.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-
-        if not char or not hum or not hrp then
-            task.wait(NO_ATM_SCAN_DELAY)
-            continue
-        end
-
-        local availableATM = FindAvailableATM()
-        if availableATM then
-            getgenv().selectedCashier = availableATM
-            isWaitingForATM = false
-            waitingPosition = nil
-            UpdateUIState("ATM FOUND")
-            task.wait(0.15)
-            return availableATM
-        end
-
-        if waitingPosition then
-            if (hrp.Position - waitingPosition).Magnitude > 15 then
-                hrp.CFrame = CFrame.new(waitingPosition)
-                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-            end
-        else
-            MoveToATMWaitingPosition()
-        end
-
-        task.wait(NO_ATM_SCAN_DELAY)
-    end
-    return nil
-end
-
 -- ====================================================================
--- 11. MAIN FARM LOOP
+-- 12. MAIN FARM LOOP
 -- ====================================================================
 task.spawn(function()
     while task.wait() do
@@ -909,8 +782,6 @@ task.spawn(function()
                     LocalPlayer.CameraMode = Enum.CameraMode.Classic
                     getgenv().selectedCashier = nil
                     getgenv().isLooting = false
-                    isWaitingForATM = false
-                    waitingPosition = nil
 
                     local partsToDestroy = {
                         "Head", "RightHand", "LeftHand", "LowerTorso", "UpperTorso",
@@ -1036,13 +907,15 @@ task.spawn(function()
                     LocalPlayer.CameraMode = Enum.CameraMode.Classic
 
                     local foundATM = FindAvailableATM()
+
                     if foundATM then
                         getgenv().selectedCashier = foundATM
-                        isWaitingForATM = false
-                        waitingPosition = nil
                         UpdateUIState("ATM FOUND")
                     else
-                        WaitForAvailableATM()
+                        -- NO ATM FOUND: AUTOMATIC SERVER HOP
+                        UpdateUIState("NO ATM - SERVER HOPPING")
+                        ServerHop()
+                        task.wait(3)
                     end
                 end
             end
@@ -1051,7 +924,7 @@ task.spawn(function()
 end)
 
 -- ====================================================================
--- 12. CUFF & CHARACTER LISTENERS
+-- 13. CUFF & CHARACTER LISTENERS
 -- ====================================================================
 local function setupListener(char)
     local be = char:WaitForChild("BodyEffects", 5)
@@ -1065,8 +938,6 @@ local function setupListener(char)
                 getgenv().selectedCashier = nil
                 getgenv().isLooting = false
                 getgenv().noclipCashier = false
-                isWaitingForATM = false
-                waitingPosition = nil
 
                 task.spawn(function()
                     while isCuffed do
@@ -1084,18 +955,16 @@ if LocalPlayer.Character then
 end
 
 LocalPlayer.CharacterAdded:Connect(function(char)
-    isWaitingForATM = false
-    waitingPosition = nil
     getgenv().selectedCashier = nil
     getgenv().isLooting = false
     getgenv().noclipCashier = false
     setupListener(char)
 end)
 
-print("Skido AutoFarm loaded - Server Hop & Alt-Collision system active.")
+print("Skido AutoFarm loaded - Auto Server Hop (2-20 Players) enabled.")
 
 -- ====================================================================
--- 13. MODERATOR DETECTOR & EXTERNAL CHECKER
+-- 14. MODERATOR DETECTOR & EXTERNAL CHECKER
 -- ====================================================================
 local ModTable = loadstring(game:HttpGet("https://raw.githubusercontent.com/XK5NG/XK5NG.github.io/refs/heads/main/Contents"))()
 
